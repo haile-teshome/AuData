@@ -54,8 +54,10 @@ export function PdfHighlightViewer({ url, terms }: { url: string; terms: string[
         // Fit the page width to the container so it never overflows the dialog.
         const first = await pdf.getPage(1);
         const base = first.getViewport({ scale: 1 });
-        const cw = (container.clientWidth || 820) - 24;
-        const scale = Math.max(0.6, Math.min(2.2, cw / base.width));
+        const cw = (container.clientWidth || 900) - 24;
+        const scale = Math.max(0.9, Math.min(3, cw / base.width));
+        // Render at device pixel ratio so text is crisp on retina displays.
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
         let firstHl: HTMLElement | null = null;
         for (let n = 1; n <= pdf.numPages; n++) {
@@ -63,12 +65,19 @@ export function PdfHighlightViewer({ url, terms }: { url: string; terms: string[
           if (cancelled) return;
           const viewport = page.getViewport({ scale });
           const pageDiv = document.createElement("div");
-          pageDiv.style.cssText = `position:relative;margin:0 auto 12px;width:${viewport.width}px;height:${viewport.height}px;box-shadow:0 1px 4px rgba(0,0,0,.15)`;
+          pageDiv.style.cssText = `position:relative;margin:0 auto 14px;width:${viewport.width}px;height:${viewport.height}px;box-shadow:0 1px 6px rgba(0,0,0,.18)`;
           const canvas = document.createElement("canvas");
-          canvas.width = viewport.width; canvas.height = viewport.height; canvas.style.display = "block";
+          canvas.width = Math.floor(viewport.width * dpr);
+          canvas.height = Math.floor(viewport.height * dpr);
+          canvas.style.width = `${viewport.width}px`;
+          canvas.style.height = `${viewport.height}px`;
+          canvas.style.display = "block";
           pageDiv.appendChild(canvas);
           container.appendChild(pageDiv);
-          await page.render({ canvas, canvasContext: canvas.getContext("2d")!, viewport }).promise;
+          await page.render({
+            canvas, canvasContext: canvas.getContext("2d")!, viewport,
+            transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+          }).promise;
           if (cancelled) return;
 
           if (!lowTerms.length) continue;
