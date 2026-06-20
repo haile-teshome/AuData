@@ -111,6 +111,9 @@ def init_db() -> None:
         c.execute("""CREATE TABLE IF NOT EXISTS flags (
             id INTEGER PRIMARY KEY AUTOINCREMENT, paper_id TEXT, agent TEXT,
             severity TEXT, data TEXT, created_at REAL)""")
+        # Raw PDF bytes for the paper under audit, so the UI can render it.
+        c.execute("""CREATE TABLE IF NOT EXISTS pdfs (
+            paper_id TEXT PRIMARY KEY, bytes BLOB, created_at REAL)""")
 
 
 def save_paper(paper: Dict[str, Any]) -> str:
@@ -138,6 +141,30 @@ def get_paper(pid: str) -> Optional[Dict[str, Any]]:
     with _db_lock, _conn() as c:
         row = c.execute("SELECT data FROM papers WHERE id=?", (pid,)).fetchone()
     return json.loads(row["data"]) if row else None
+
+
+def save_pdf(paper_id: str, data: bytes) -> None:
+    if not paper_id or not data:
+        return
+    now = time.time()
+    with _db_lock, _conn() as c:
+        c.execute(
+            """INSERT INTO pdfs (paper_id, bytes, created_at) VALUES (?,?,?)
+               ON CONFLICT(paper_id) DO UPDATE SET bytes=excluded.bytes, created_at=excluded.created_at""",
+            (paper_id, sqlite3.Binary(data), now),
+        )
+
+
+def get_pdf(paper_id: str) -> Optional[bytes]:
+    with _db_lock, _conn() as c:
+        row = c.execute("SELECT bytes FROM pdfs WHERE paper_id=?", (paper_id,)).fetchone()
+    return bytes(row["bytes"]) if row else None
+
+
+def has_pdf(paper_id: str) -> bool:
+    with _db_lock, _conn() as c:
+        row = c.execute("SELECT 1 FROM pdfs WHERE paper_id=?", (paper_id,)).fetchone()
+    return bool(row)
 
 
 def db_status() -> Dict[str, Any]:

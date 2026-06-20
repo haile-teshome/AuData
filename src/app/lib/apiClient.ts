@@ -932,6 +932,7 @@ export type PaperUnderAudit = {
   references_detected: number;
   retracted: boolean;
   providers: string[];
+  has_pdf?: boolean;
 };
 
 export type IngestCandidate = {

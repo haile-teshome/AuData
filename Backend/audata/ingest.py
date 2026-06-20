@@ -122,7 +122,7 @@ def _build_paper(
         "num_pages": num_pages, "char_count": len(full_text or ""),
         "sections": sections, "tables_detected": len(tables), "table_numbers": tables[:50],
         "figures_detected": len(figures), "references_detected": _count_references(full_text) if full_text else 0,
-        "retracted": bool(retracted), "providers": providers or [],
+        "retracted": bool(retracted), "providers": providers or [], "has_pdf": False,
     }
 
 

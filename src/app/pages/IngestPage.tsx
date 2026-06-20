@@ -13,7 +13,7 @@ import {
   Upload, FileText, Hash, Search, Globe, Loader2, ExternalLink, Ban, X, ChevronDown, ChevronRight, FileQuestion,
 } from "lucide-react";
 import { useStore } from "../lib/store";
-import { IngestService, type IngestCandidate, type PaperUnderAudit } from "../lib/apiClient";
+import { IngestService, apiConfig, type IngestCandidate, type PaperUnderAudit } from "../lib/apiClient";
 
 export function IngestPage() {
   const s = useStore();
@@ -214,6 +214,7 @@ function SearchTab({ busy, setBusy, setError, onPick }: {
 
 function PaperPanel({ paper, onClear }: { paper: PaperUnderAudit; onClear: () => void }) {
   const [showText, setShowText] = useState(false);
+  const [showPdf, setShowPdf] = useState(false);
   return (
     <Card className="p-5 space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -276,16 +277,40 @@ function PaperPanel({ paper, onClear }: { paper: PaperUnderAudit; onClear: () =>
         </div>
       )}
 
-      {/* Full-text preview */}
+      {/* Associated PDF */}
+      {paper.has_pdf && (
+        <div>
+          <button onClick={() => setShowPdf((v) => !v)} className="flex items-center gap-1 text-sm font-medium">
+            {showPdf ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+            PDF
+            <a
+              href={`${apiConfig.baseUrl}/ingest/pdf-file?id=${encodeURIComponent(paper.id)}`}
+              target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+              className="ml-2 text-xs text-primary hover:underline inline-flex items-center gap-1"
+            >
+              open in new tab <ExternalLink className="size-3" />
+            </a>
+          </button>
+          {showPdf && (
+            <iframe
+              title="Associated PDF"
+              src={`${apiConfig.baseUrl}/ingest/pdf-file?id=${encodeURIComponent(paper.id)}`}
+              className="mt-2 w-full h-[800px] rounded border bg-muted/30"
+            />
+          )}
+        </div>
+      )}
+
+      {/* Full text (complete, scrollable) */}
       {paper.has_full_text && (
         <div>
           <button onClick={() => setShowText((v) => !v)} className="flex items-center gap-1 text-sm font-medium">
             {showText ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-            Full-text preview
+            Full text <span className="text-xs text-muted-foreground ml-1">({paper.char_count.toLocaleString()} chars)</span>
           </button>
           {showText && (
-            <pre className="mt-2 max-h-80 overflow-auto text-[11px] whitespace-pre-wrap bg-muted/50 rounded p-3 leading-relaxed">
-              {paper.full_text.slice(0, 8000)}{paper.full_text.length > 8000 ? "\n\n… (truncated)" : ""}
+            <pre className="mt-2 max-h-[600px] overflow-auto text-[11px] whitespace-pre-wrap bg-muted/50 rounded p-3 leading-relaxed">
+              {paper.full_text}
             </pre>
           )}
         </div>

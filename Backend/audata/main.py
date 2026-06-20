@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -81,8 +81,14 @@ class IngestUrlRequest(BaseModel):
     session_id: Optional[str] = ""
 
 
-def _persist(paper: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+def _persist(paper: Dict[str, Any], session_id: Optional[str], pdf_bytes: Optional[bytes] = None) -> Dict[str, Any]:
     """Long-term to SQLite, short-term to Redis (if a session id was given)."""
+    if pdf_bytes:
+        try:
+            storage.save_pdf(paper["id"], pdf_bytes)
+            paper["has_pdf"] = True
+        except Exception as e:
+            print(f"[audata] save_pdf failed: {e}")
     try:
         storage.save_paper(paper)
     except Exception as e:
@@ -96,9 +102,10 @@ def _persist(paper: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]
 
 
 def _full_text_via_browserbase(url: str):
+    """Returns (text, source_label, bb_info, pdf_bytes|None)."""
     bb = browserbase_fetch.fetch_url(url)
     if bb.get("status") != "ok":
-        return "", "", bb
+        return "", "", bb, None
     pdf_url = bb.get("pdf_url") or ""
     if pdf_url:
         try:
@@ -106,13 +113,13 @@ def _full_text_via_browserbase(url: str):
             if r.status_code == 200 and "pdf" in (r.headers.get("content-type") or "").lower():
                 text = ingest.extract_text_from_pdf(r.content)
                 if text and len(text) > 400:
-                    return text, "Browserbase → PDF", bb
+                    return text, "Browserbase → PDF", bb, r.content
         except Exception as e:
             print(f"[audata browserbase pdf] {e}")
     txt = (bb.get("text") or "").strip()
     if len(txt) > 400:
-        return txt, "Browserbase (page text)", bb
-    return "", "", bb
+        return txt, "Browserbase (page text)", bb, None
+    return "", "", bb, None
 
 
 @app.post("/api/ingest/search")
@@ -144,8 +151,9 @@ def ingest_fetch(req: IngestFetchRequest):
             print(f"[audata fulltext ladder] {e}")
     # Tier B — Browserbase fallback for anything the OA ladder can't reach.
     bb_info: Dict[str, Any] = {}
+    pdf_bytes: Optional[bytes] = None
     if not full_text and req.use_browserbase and url and browserbase_fetch.available():
-        full_text, ft_source, bb_info = _full_text_via_browserbase(url)
+        full_text, ft_source, bb_info, pdf_bytes = _full_text_via_browserbase(url)
 
     paper = ingest._build_paper(
         source="doi" if doi else "url", ident=doi or url or title,
@@ -158,7 +166,7 @@ def ingest_fetch(req: IngestFetchRequest):
         retracted=bool(meta.get("retracted")) if meta.get("resolved") else False,
         providers=meta.get("providers", []) if meta.get("resolved") else [],
     )
-    _persist(paper, req.session_id)
+    _persist(paper, req.session_id, pdf_bytes)
     return {"paper": paper, "resolved": bool(meta.get("resolved")),
             "browserbase": {k: bb_info.get(k) for k in ("status", "session_id", "final_url") if k in bb_info}}
 
@@ -170,7 +178,7 @@ def ingest_url(req: IngestUrlRequest):
         raise HTTPException(status_code=400, detail="A URL is required.")
     if not browserbase_fetch.available():
         raise HTTPException(status_code=400, detail="Browserbase is not configured on the server.")
-    full_text, ft_source, bb_info = _full_text_via_browserbase(url)
+    full_text, ft_source, bb_info, pdf_bytes = _full_text_via_browserbase(url)
     if bb_info.get("status") != "ok":
         raise HTTPException(status_code=502, detail=f"Browserbase fetch failed: {bb_info.get('reason', 'unknown')}")
     doi = ingest.detect_doi(full_text[:4000]) or ingest.detect_doi(bb_info.get("final_url", ""))
@@ -193,7 +201,7 @@ def ingest_url(req: IngestUrlRequest):
         retracted=bool(meta.get("retracted")) if meta.get("resolved") else False,
         providers=meta.get("providers", []) if meta.get("resolved") else [],
     )
-    _persist(paper, req.session_id)
+    _persist(paper, req.session_id, pdf_bytes)
     return {"paper": paper, "browserbase": {k: bb_info.get(k) for k in ("status", "session_id", "final_url")}}
 
 
@@ -214,8 +222,18 @@ def ingest_pdf(file: UploadFile = File(...), x_session_id: Optional[str] = Heade
             paper["retracted"] = bool(meta.get("retracted"))
             paper["providers"] = meta.get("providers") or []
             paper["url"] = paper["url"] or meta.get("url") or ""
-    _persist(paper, x_session_id)
+    _persist(paper, x_session_id, data)  # keep the uploaded PDF for the viewer
     return {"paper": paper}
+
+
+@app.get("/api/ingest/pdf-file")
+def ingest_pdf_file(id: str):
+    """Serve a stored PDF same-origin so the browser can render it inline."""
+    data = storage.get_pdf(id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No PDF stored for this paper.")
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="paper.pdf"'})
 
 
 # ── storage access ────────────────────────────────────────────────────────────
