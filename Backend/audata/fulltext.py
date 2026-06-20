@@ -27,6 +27,25 @@ _EPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 _EPMC_REST = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 
 _ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w./-]+?)(?:v\d+)?(?:\.pdf)?(?:[/?#]|$)", re.I)
+_PMCID_RE = re.compile(r"PMC\d+", re.I)
+_PMID_RE = re.compile(r"(?:pubmed/|[?&]pmid=)(\d+)", re.I)
+
+
+def ids_from_url(url: str) -> Dict[str, str]:
+    """Mine open-access identifiers (PMCID / DOI / arXiv / PMID) from a URL."""
+    url = url or ""
+    pmcid = _PMCID_RE.search(url)
+    pm = _PMID_RE.search(url)
+    return {
+        "pmcid": pmcid.group(0).upper() if pmcid else "",
+        "doi": ingest.detect_doi(url),
+        "arxiv": extract_arxiv_id(url) or "",
+        "pmid": pm.group(1) if pm else "",
+    }
+
+
+def fetch_pmc_pdf_bytes(pmcid: str) -> Optional[bytes]:
+    return _fetch_pmc_pdf(pmcid)
 
 
 def _extract_pdf(pdf_bytes: bytes) -> str:
@@ -39,10 +58,12 @@ def extract_arxiv_id(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def lookup_ids(doi: str = "", pmid: str = "") -> Dict[str, Optional[str]]:
-    """Resolve a DOI or PMID to Europe PMC ids (pmcid / pmid / id / source)."""
+def lookup_ids(doi: str = "", pmid: str = "", pmcid: str = "") -> Dict[str, Optional[str]]:
+    """Resolve a DOI / PMID / PMCID to Europe PMC ids (pmcid / pmid / id / source / doi)."""
     q = None
-    if pmid and str(pmid).strip().isdigit():
+    if pmcid:
+        q = f"PMCID:{pmcid}"
+    elif pmid and str(pmid).strip().isdigit():
         q = f"EXT_ID:{pmid} AND SRC:MED"
     elif doi:
         q = f'DOI:"{doi}"'
@@ -114,10 +135,11 @@ def _fetch_arxiv_pdf(arxiv_id: str) -> Optional[bytes]:
 
 
 def fetch_full_text(doi: str = "", url: str = "", title: str = "", source: str = "",
-                    pmid: str = "") -> Tuple[str, str]:
+                    pmid: str = "", pmcid: str = "") -> Tuple[str, str]:
     """Try the open-access ladder. Returns (text, source_label) or ("", "")."""
-    ids = lookup_ids(doi=doi, pmid=pmid)
-    pmcid = ids.get("pmcid")
+    ids = lookup_ids(doi=doi, pmid=pmid, pmcid=pmcid) if not (pmcid and doi) else {}
+    pmcid = pmcid or ids.get("pmcid")
+    doi = doi or ids.get("doi") or ""
     epmc_id, epmc_src = ids.get("id"), ids.get("source")
 
     # Tier 1 — Europe PMC structured XML.

@@ -182,21 +182,47 @@ def ingest_url(req: IngestUrlRequest):
     url = (req.url or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="A URL is required.")
-    if not browserbase_fetch.available():
-        raise HTTPException(status_code=400, detail="Browserbase is not configured on the server.")
-    full_text, ft_source, bb_info, pdf_bytes = _full_text_via_browserbase(url)
-    if bb_info.get("status") != "ok":
-        raise HTTPException(status_code=502, detail=f"Browserbase fetch failed: {bb_info.get('reason', 'unknown')}")
-    doi = ingest.detect_doi(full_text[:4000]) or ingest.detect_doi(bb_info.get("final_url", ""))
+
+    # Tier A — if the URL carries an OA identifier (PMC / DOI / arXiv / PMID),
+    # use the open-access API ladder. This avoids NCBI/publisher bot-walls
+    # (e.g. PMC serves a reCAPTCHA to headless browsers).
+    ids = fulltext.ids_from_url(url)
+    look = fulltext.lookup_ids(doi=ids["doi"], pmid=ids["pmid"], pmcid=ids["pmcid"]) if (ids["doi"] or ids["pmid"] or ids["pmcid"]) else {}
+    doi = ids["doi"] or (look.get("doi") or "")
+    pmcid = ids["pmcid"] or (look.get("pmcid") or "")
+    full_text, ft_source, pdf_bytes = "", "", None
+    bb_info: Dict[str, Any] = {}
+
+    if doi or pmcid or ids["arxiv"]:
+        full_text, ft_source = fulltext.fetch_full_text(
+            doi=doi, pmcid=pmcid, pmid=(look.get("pmid") or ids["pmid"] or ""), url=url, source="arxiv" if ids["arxiv"] else "")
+        if pmcid:
+            pdf_bytes = fulltext.fetch_pmc_pdf_bytes(pmcid)  # for the in-app PDF viewer
+
+    # Tier B — Browserbase. For NCBI/PMC origins (which serve a reCAPTCHA to
+    # headless browsers) point it at the Europe PMC article page instead, which
+    # renders the full text and isn't bot-walled.
+    if not full_text and browserbase_fetch.available():
+        browse_url = url
+        host = (url.split("/", 3)[2].lower() if "://" in url else "")
+        if pmcid and ("ncbi.nlm.nih.gov" in host or "pubmed" in host):
+            browse_url = f"https://europepmc.org/articles/{pmcid}"
+        elif (look.get("pmid") or ids["pmid"]) and ("ncbi.nlm.nih.gov" in host or "pubmed" in host):
+            browse_url = f"https://europepmc.org/article/MED/{look.get('pmid') or ids['pmid']}"
+        bt, bs, bb_info, bpdf = _full_text_via_browserbase(browse_url)
+        low = (bt or "")[:300].lower()
+        if bt and "recaptcha" not in low and "checking your browser" not in low:
+            full_text, ft_source, pdf_bytes = bt, bs, (pdf_bytes or bpdf)
+        doi = doi or ingest.detect_doi((bt or "")[:4000]) or ingest.detect_doi(bb_info.get("final_url", ""))
+    elif not full_text and not (doi or pmcid):
+        raise HTTPException(status_code=400, detail="Browserbase is not configured, and no open-access source was found for this URL.")
+
     meta = ingest.resolve_doi(doi) if doi else {"resolved": False}
-    # If the page yielded a DOI, the open-access ladder usually beats scraped
-    # landing-page text (which is mostly cookie banner + nav). Prefer it.
-    if doi:
-        oa_text, oa_src = fulltext.fetch_full_text(doi=doi, url=bb_info.get("final_url", url))
-        if oa_text and len(oa_text) > len(full_text):
-            full_text, ft_source = oa_text, oa_src
+    if not full_text and bb_info and bb_info.get("status") != "ok" and not meta.get("resolved"):
+        raise HTTPException(status_code=502, detail="Could not retrieve this URL (no open-access source and the page was blocked or empty).")
+
     paper = ingest._build_paper(
-        source="url", ident=doi or url,
+        source="url", ident=doi or pmcid or url,
         title=(meta.get("title") if meta.get("resolved") else "") or bb_info.get("title", "") or url,
         authors=meta.get("authors", "") if meta.get("resolved") else "",
         year=meta.get("year") if meta.get("resolved") else None,
@@ -208,7 +234,8 @@ def ingest_url(req: IngestUrlRequest):
         providers=meta.get("providers", []) if meta.get("resolved") else [],
     )
     _persist(paper, req.session_id, pdf_bytes)
-    return {"paper": paper, "browserbase": {k: bb_info.get(k) for k in ("status", "session_id", "final_url")}}
+    return {"paper": paper, "full_text_source": ft_source,
+            "browserbase": {k: bb_info.get(k) for k in ("status", "session_id", "final_url") if k in bb_info}}
 
 
 @app.post("/api/ingest/pdf")
@@ -247,6 +274,22 @@ def ingest_pdf_file(id: str):
 @app.get("/api/session/{session_id}/paper")
 def session_paper(session_id: str):
     return {"paper": storage.session_get(session_id, "paper_under_audit")}
+
+
+class SessionDataRequest(BaseModel):
+    value: Any = None
+
+
+@app.put("/api/session/{session_id}/data/{key}")
+def session_data_set(session_id: str, key: str, req: SessionDataRequest):
+    """Stash arbitrary per-session data in Redis (short-term, with TTL)."""
+    storage.session_set(session_id, key, req.value)
+    return {"ok": True}
+
+
+@app.get("/api/session/{session_id}/data/{key}")
+def session_data_get(session_id: str, key: str):
+    return {"value": storage.session_get(session_id, key)}
 
 
 @app.get("/api/audits")
@@ -378,9 +421,76 @@ def reference_integrity_stream(req: ReferenceIntegrityRequest):
 
 @app.get("/api/reference-integrity/from-paper")
 def reference_integrity_from_paper(paper_id: str):
-    """Extract candidate references (DOIs) from a stored paper's reference list."""
+    """Extract candidate references (DOIs / citations) from a stored paper."""
     paper = storage.get_paper(paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found. Ingest it first.")
     refs = refint.extract_references_from_text(paper.get("full_text", ""))
     return {"references": refs, "count": len(refs)}
+
+
+class CheckPaperRequest(BaseModel):
+    paper_id: str
+    model: Optional[str] = None
+    check_claims: bool = True
+
+
+@app.post("/api/reference-integrity/check-paper/stream")
+def reference_integrity_check_paper_stream(req: CheckPaperRequest):
+    """Full reference-integrity audit of a stored paper, streamed.
+
+    Extracts the bibliography, links each reference to the in-text sentence that
+    cites it, and runs the whole battery (existence, retraction, mismatch, claim
+    support, future-dated, self-citation, uncited, duplicate). Ends with summary
+    + paper-level metrics.
+    """
+    paper = storage.get_paper(req.paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found. Ingest it first.")
+    prepared = refint.prepare_paper_references(paper)
+    model = llm.get_model(req.model) if req.check_claims else None
+    event_queue: "queue.Queue[tuple]" = queue.Queue()
+
+    def _run():
+        results: List[Dict[str, Any]] = []
+        try:
+            if not prepared:
+                event_queue.put(("done", {"summary": refint.summarize([]), "metrics": refint.paper_metrics([]),
+                                          "note": "No references could be parsed from this paper's reference list."}))
+                return
+            workers = min(8, max(1, len(prepared)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(refint.check_reference, i, p["doi"], p["raw"], p["claim"],
+                                  model, req.check_claims, p["ctx"], p["number"]): i
+                        for i, p in enumerate(prepared)}
+                for fut in as_completed(futs):
+                    i = futs[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:
+                        res = {"index": i, "number": prepared[i].get("number"),
+                               "input": {"doi": prepared[i].get("doi", ""), "raw": prepared[i].get("raw", ""), "claim": prepared[i].get("claim", "")},
+                               "resolved": False, "matched": {}, "retracted": False, "cited_count": None,
+                               "claim": {"verdict": "error", "confidence": 0.0, "reasoning": str(e), "quote": ""},
+                               "issues": [{"code": "error", "label": f"Check failed: {e}", "severity": "medium", "detail": str(e)}],
+                               "severity": "medium", "status": "flagged"}
+                    results.append(res)
+                    event_queue.put(("result", res))
+            event_queue.put(("done", {"summary": refint.summarize(results), "metrics": refint.paper_metrics(results)}))
+        except Exception as e:
+            event_queue.put(("error", {"message": str(e)}))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    def _gen():
+        while True:
+            try:
+                event_type, data = event_queue.get(timeout=600)
+            except queue.Empty:
+                yield f"event: error\ndata: {_json.dumps({'message': 'timeout'})}\n\n"
+                return
+            yield f"event: {event_type}\ndata: {_json.dumps(data)}\n\n"
+            if event_type in ("done", "error"):
+                return
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")

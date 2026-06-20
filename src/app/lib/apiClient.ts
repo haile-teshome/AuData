@@ -996,24 +996,45 @@ export const IngestService = {
   },
 };
 
+// Per-session key/value store backed by Redis on the server (short-term).
+export const SessionStore = {
+  async set(key: string, value: any): Promise<void> {
+    try {
+      await fetch(`${apiConfig.baseUrl}/session/${encodeURIComponent(clientSessionId())}/data/${encodeURIComponent(key)}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }),
+      });
+    } catch { /* best-effort */ }
+  },
+  async get(key: string): Promise<any> {
+    try {
+      const r = await fetch(`${apiConfig.baseUrl}/session/${encodeURIComponent(clientSessionId())}/data/${encodeURIComponent(key)}`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j?.value ?? null;
+    } catch { return null; }
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Reference Integrity (Detect)
 // ---------------------------------------------------------------------------
 
 export type RefSeverity = "none" | "info" | "low" | "medium" | "high";
 export type RefInput = { doi?: string; raw?: string; claim?: string };
-export type RefIssue = { code: string; label: string; severity: RefSeverity };
+export type RefIssue = { code: string; label: string; severity: RefSeverity; detail?: string };
 export type RefClaim = {
   verdict: "supports" | "partial" | "unsupported" | "unrelated" | "unverifiable" | "no_claim" | "skipped" | "error";
   confidence: number; reasoning: string; quote: string;
 };
 export type RefResult = {
   index: number;
+  number?: number | null;
   input: RefInput;
   resolved: boolean;
   matched: { title?: string; doi?: string; year?: number | null; authors?: string; container?: string; url?: string; providers?: string[]; abstract_present?: boolean };
   title_similarity?: number | null;
   retracted: boolean;
+  cited_count?: number | null;
   claim: RefClaim;
   issues: RefIssue[];
   severity: RefSeverity;
@@ -1022,6 +1043,11 @@ export type RefResult = {
 export type RefSummary = {
   total: number; flagged: number; retracted: number; unresolved: number;
   by_severity: Record<string, number>; by_issue: Record<string, number>;
+};
+export type RefMetrics = {
+  self_citations: number; self_citation_rate: number;
+  uncited_count: number; duplicate_count: number; future_dated_count: number;
+  oldest_year: number | null; newest_year: number | null; median_year: number | null; most_cited: number;
 };
 
 export const ReferenceIntegrityService = {
@@ -1033,16 +1059,14 @@ export const ReferenceIntegrityService = {
     return j?.references || [];
   },
 
-  // Stream one flag per reference as it finishes; resolve with all + summary.
-  async check(
-    references: RefInput[],
-    opts: { checkClaims?: boolean; signal?: AbortSignal; onResult?: (r: RefResult) => void } = {},
-  ): Promise<{ results: RefResult[]; summary: RefSummary | null }> {
-    const res = await fetch(`${apiConfig.baseUrl}/reference-integrity/check/stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ references, model: apiConfig.model, check_claims: opts.checkClaims !== false }),
-      signal: opts.signal,
+  // Stream one flag per reference as it finishes; resolve with all + summary (+ metrics).
+  async _stream(
+    path: string, body: any,
+    opts: { signal?: AbortSignal; onResult?: (r: RefResult) => void },
+  ): Promise<{ results: RefResult[]; summary: RefSummary | null; metrics: RefMetrics | null }> {
+    const res = await fetch(`${apiConfig.baseUrl}${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: opts.signal,
     });
     if (!res.ok || !res.body) throw new Error(`reference-integrity stream failed (${res.status})`);
     const reader = res.body.getReader();
@@ -1050,6 +1074,7 @@ export const ReferenceIntegrityService = {
     let buf = "";
     const results: RefResult[] = [];
     let summary: RefSummary | null = null;
+    let metrics: RefMetrics | null = null;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -1067,11 +1092,23 @@ export const ReferenceIntegrityService = {
         let parsed: any;
         try { parsed = JSON.parse(data); } catch { continue; }
         if (event === "result") { results.push(parsed); opts.onResult?.(parsed); }
-        else if (event === "done") summary = parsed?.summary ?? null;
+        else if (event === "done") { summary = parsed?.summary ?? null; metrics = parsed?.metrics ?? null; }
         else if (event === "error") throw new Error(parsed?.message || "reference-integrity error");
       }
     }
     results.sort((a, b) => a.index - b.index);
-    return { results, summary };
+    return { results, summary, metrics };
+  },
+
+  // Manual list of references (no paper-level checks).
+  check(references: RefInput[], opts: { checkClaims?: boolean; signal?: AbortSignal; onResult?: (r: RefResult) => void } = {}) {
+    return this._stream("/reference-integrity/check/stream",
+      { references, model: apiConfig.model, check_claims: opts.checkClaims !== false }, opts);
+  },
+
+  // Full audit of the ingested paper: bibliography + in-text claims + paper metrics.
+  checkPaper(paperId: string, opts: { checkClaims?: boolean; signal?: AbortSignal; onResult?: (r: RefResult) => void } = {}) {
+    return this._stream("/reference-integrity/check-paper/stream",
+      { paper_id: paperId, model: apiConfig.model, check_claims: opts.checkClaims !== false }, opts);
   },
 };
