@@ -88,9 +88,9 @@ class IngestUrlRequest(BaseModel):
     session_id: Optional[str] = ""
 
 
-def _pdf_for_viewer(doi: str, pmcid: str = "") -> Optional[bytes]:
-    """Best-effort free PDF (Unpaywall, then PMC) so the UI can show a PDF tab
-    even when the full text came from structured XML."""
+def _pdf_for_viewer(doi: str, pmcid: str = "", arxiv: str = "") -> Optional[bytes]:
+    """Best-effort free PDF (Unpaywall → PMC → arXiv) so the UI can show a PDF
+    tab even when the full text came from structured XML."""
     try:
         if doi:
             b = ingest.fetch_unpaywall_pdf(doi)
@@ -98,6 +98,10 @@ def _pdf_for_viewer(doi: str, pmcid: str = "") -> Optional[bytes]:
                 return b
         if pmcid:
             b = fulltext.fetch_pmc_pdf_bytes(pmcid)
+            if b:
+                return b
+        if arxiv:
+            b = fulltext.fetch_arxiv_pdf_bytes(arxiv)
             if b:
                 return b
     except Exception as e:
@@ -238,6 +242,12 @@ def ingest_url(req: IngestUrlRequest):
         raise HTTPException(status_code=400, detail="Browserbase is not configured, and no open-access source was found for this URL.")
 
     meta = ingest.resolve_doi(doi) if doi else {"resolved": False}
+    if not meta.get("resolved") and ids["arxiv"]:
+        am = fulltext.fetch_arxiv_meta(ids["arxiv"])
+        if am.get("title"):
+            meta = {"resolved": True, "title": am["title"], "authors": am.get("authors", ""),
+                    "year": am.get("year"), "container": "arXiv", "abstract": am.get("abstract", ""),
+                    "url": am.get("url", ""), "retracted": False, "providers": ["arXiv"]}
     if not full_text and bb_info and bb_info.get("status") != "ok" and not meta.get("resolved"):
         raise HTTPException(status_code=502, detail="Could not retrieve this URL (no open-access source and the page was blocked or empty).")
 
@@ -253,8 +263,8 @@ def ingest_url(req: IngestUrlRequest):
         retracted=bool(meta.get("retracted")) if meta.get("resolved") else False,
         providers=meta.get("providers", []) if meta.get("resolved") else [],
     )
-    if pdf_bytes is None and (doi or pmcid):
-        pdf_bytes = _pdf_for_viewer(doi, pmcid)
+    if pdf_bytes is None and (doi or pmcid or ids["arxiv"]):
+        pdf_bytes = _pdf_for_viewer(doi, pmcid, ids["arxiv"])
     _persist(paper, req.session_id, pdf_bytes)
     return {"paper": paper, "full_text_source": ft_source,
             "browserbase": {k: bb_info.get(k) for k in ("status", "session_id", "final_url") if k in bb_info}}

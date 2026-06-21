@@ -48,6 +48,37 @@ def fetch_pmc_pdf_bytes(pmcid: str) -> Optional[bytes]:
     return _fetch_pmc_pdf(pmcid)
 
 
+def fetch_arxiv_pdf_bytes(arxiv_id: str) -> Optional[bytes]:
+    return _fetch_arxiv_pdf(arxiv_id)
+
+
+def fetch_arxiv_meta(arxiv_id: str) -> Dict[str, Any]:
+    """Title / authors / year / abstract from the arXiv API (no Crossref DOI)."""
+    if not arxiv_id:
+        return {}
+    try:
+        r = requests.get("http://export.arxiv.org/api/query", headers=_HEADERS, timeout=20,
+                         params={"id_list": arxiv_id, "max_results": 1})
+        if r.status_code != 200:
+            return {}
+        soup = BeautifulSoup(r.content, "lxml-xml")
+        entry = soup.find("entry")
+        if not entry:
+            return {}
+        def _t(tag):
+            el = entry.find(tag)
+            return " ".join(el.get_text().split()) if el else ""
+        names = [n.get_text().strip() for a in entry.find_all("author") if (n := a.find("name"))]
+        pub = _t("published")
+        year = int(pub[:4]) if pub[:4].isdigit() else None
+        return {"title": _t("title"), "authors": ", ".join(names[:8]),
+                "year": year, "abstract": _t("summary"),
+                "url": f"https://arxiv.org/abs/{arxiv_id}"}
+    except Exception as e:
+        print(f"[fulltext.fetch_arxiv_meta] {e}")
+        return {}
+
+
 def _extract_pdf(pdf_bytes: bytes) -> str:
     text = ingest.extract_text_from_pdf(pdf_bytes) if pdf_bytes else ""
     return text if text and len(text) > 200 else ""
