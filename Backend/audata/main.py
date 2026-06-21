@@ -377,7 +377,7 @@ class ReferenceIntegrityRequest(BaseModel):
 
 
 def _ri_model(req: "ReferenceIntegrityRequest"):
-    return llm.get_model(req.model) if req.check_claims else None
+    return llm.get_model(llm.resolve_thinking(req.model)) if req.check_claims else None
 
 
 def _ri_check_all(refs: List["RefItem"], model, check_claims: bool) -> List[Dict[str, Any]]:
@@ -462,7 +462,7 @@ def methods_claims_stream(req: MethodsClaimsRequest):
     paper = storage.get_paper(req.paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found. Ingest it first.")
-    model = llm.get_model(req.model)
+    model = llm.get_model(llm.resolve_thinking(req.model))
     event_queue: "queue.Queue[tuple]" = queue.Queue()
 
     def _run():
@@ -537,7 +537,7 @@ def reference_integrity_check_paper_stream(req: CheckPaperRequest):
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found. Ingest it first.")
     prepared = refint.prepare_paper_references(paper)
-    model = llm.get_model(req.model) if req.check_claims else None
+    model = llm.get_model(llm.resolve_thinking(req.model)) if req.check_claims else None
     event_queue: "queue.Queue[tuple]" = queue.Queue()
 
     def _run():

@@ -18,6 +18,18 @@ def default_model() -> str:
     return os.getenv("DEFAULT_MODEL") or "claude-sonnet-4-6"
 
 
+def is_screening_model(name: str) -> bool:
+    return "leads" in (name or "").lower()
+
+
+def resolve_thinking(name: str) -> str:
+    """Reasoning tasks (claim/methods analysis) must not use the screening-only
+    LEADS model — route those to the capable default model instead."""
+    if not name or is_screening_model(name):
+        return default_model()
+    return name
+
+
 def get_model(model_name: Optional[str] = None):
     name = (model_name or default_model() or "").strip()
     low = name.lower()

@@ -33,7 +33,8 @@ _FLAGGED = {"low", "medium", "high"}
 _GREY_LIT = ("retrieved", "available at", "available from", "accessed", "http://",
              "https://", "www.", "[online]", "blog", "call for papers", "press release", "white paper")
 
-_REF_MARKER = re.compile(r"(?m)^\s*\[?(\d{1,3})\]?[.)]\s+")
+# Matches numbered reference entries: "1.", "1)", "[1]", "[1].", "[1] " etc.
+_REF_MARKER = re.compile(r"(?m)^\s*(?:\[(\d{1,3})\][.)]?\s+|(\d{1,3})[.)]\s+)")
 _CITE_GROUP = re.compile(r"\[([0-9,\s–\-]+)\]")
 
 
@@ -144,7 +145,7 @@ def extract_references(full_text: str, limit: int = 120) -> Tuple[List[Dict[str,
     markers = list(_REF_MARKER.finditer(tail))
     if len(markers) >= 3:
         for i, m in enumerate(markers):
-            number = int(m.group(1))
+            number = int(m.group(1) or m.group(2))
             start = m.end()
             end = markers[i + 1].start() if i + 1 < len(markers) else len(tail)
             entry = " ".join(tail[start:end].split())
