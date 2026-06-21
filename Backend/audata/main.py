@@ -19,6 +19,8 @@ import json as _json
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -32,6 +34,10 @@ from . import reference_integrity as refint
 from . import methods_claims as mc
 
 app = FastAPI(title="AuData API", version="0.1.0")
+
+_repo_root = str(Path(__file__).resolve().parents[2])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 _origins = ["http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5173"] + settings.CORS_ORIGINS
 app.add_middleware(
@@ -107,6 +113,13 @@ def _pdf_for_viewer(doi: str, pmcid: str = "", arxiv: str = "") -> Optional[byte
     except Exception as e:
         print(f"[audata _pdf_for_viewer] {e}")
     return None
+
+
+class StatisticalRecomputeRequest(BaseModel):
+    paper_id: Optional[str] = ""
+    title: Optional[str] = ""
+    full_text: str
+    tolerance: float = 0.001
 
 
 def _persist(paper: Dict[str, Any], session_id: Optional[str], pdf_bytes: Optional[bytes] = None) -> Dict[str, Any]:
@@ -299,6 +312,31 @@ def ingest_pdf_file(id: str):
         raise HTTPException(status_code=404, detail="No PDF stored for this paper.")
     return Response(content=data, media_type="application/pdf",
                     headers={"Content-Disposition": 'inline; filename="paper.pdf"'})
+
+
+@app.post("/api/audit/statistical-recompute")
+def statistical_recompute(req: StatisticalRecomputeRequest):
+    if not (req.full_text or "").strip():
+        raise HTTPException(status_code=400, detail="No full text available to audit.")
+    try:
+        from auditor.core import audit_pdf_bytes, audit_text
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Statistical auditor is unavailable: {e}")
+
+    pdf_bytes = storage.get_pdf(req.paper_id or "") if req.paper_id else None
+    if pdf_bytes:
+        result = audit_pdf_bytes(pdf_bytes, source=req.title or req.paper_id or "uploaded PDF", tolerance=req.tolerance)
+        findings = result["findings"]
+    else:
+        text_findings = audit_text(req.full_text, tolerance=req.tolerance)
+        findings = [finding.to_dict() for finding in text_findings]
+    return {
+        "paper_id": req.paper_id,
+        "title": req.title,
+        "claim_count": len(findings),
+        "mismatch_count": sum(1 for finding in findings if finding["status"] == "mismatch"),
+        "findings": findings,
+    }
 
 
 # ── storage access ────────────────────────────────────────────────────────────
